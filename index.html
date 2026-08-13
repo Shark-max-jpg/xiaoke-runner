@@ -164,7 +164,7 @@ let state = STATE.WAIT;
 let score = 0, speed = 4.5, lastObsTime = 0;
 // 从 localStorage 读取最高分
 let highScore = parseInt(localStorage.getItem('xiaoke_highscore')) || 0;
-let frameTimer = 0, runFrameIdx = 0, lastTime = 0;
+let frameTimer = 0, runFrameIdx = 0;
 
 const player = { x: 80, y: 0, vy: 0, grounded: true, ducking: false };
 let obstacles = [];
