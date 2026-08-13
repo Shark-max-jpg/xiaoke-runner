@@ -351,9 +351,10 @@ function getPlayerRect() {
 }
 
 // ============ 主循环 ============
+let lastTimestamp = 0;
 function loop(timestamp) {
-  const dt = Math.min(timestamp - (lastTime || timestamp), 33);
-  lastTime = timestamp;
+  const dt = Math.min(timestamp - lastTimestamp, 33);
+  lastTimestamp = timestamp;
   update(dt, timestamp);
   draw(dt);
   requestAnimationFrame(loop);
