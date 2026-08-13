@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>鲨克快跑</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #f7f7f7;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    font-family: 'Courier New', monospace;
+    overflow: hidden;
+  }
+  canvas {
+    border-bottom: 3px solid #535353;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    background: #fff;
+  }
+  #hint { margin-top: 12px; color: #535353; font-size: 14px; }
+  #debug { margin-top: 6px; color: #999; font-size: 11px; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hint">按空格键开始 / 跳跃 &nbsp;|&nbsp; ↓ 滑行</div>
+<div id="debug"></div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const debugEl = document.getElementById('debug');
+
+const W = 800, H = 400; // 增加画布高度从 260 到 400
+canvas.width = W;
+canvas.height = H;
+
+// ============ 配置 ============
+const SCALE = 0.085;
+const RUN_CYCLE = 18;
+const RUN_FPS = 24;
+const GRAVITY = 0.55;
+const JUMP_FORCE = -13.5;
+
+// ============ 工具：扫描图片非透明像素的边界 ============
+function getBoundedImg(img) {
+  const tmpCanvas = document.createElement('canvas');
+  const tmpCtx = tmpCanvas.getContext('2d');
+  tmpCanvas.width = img.naturalWidth;
+  tmpCanvas.height = img.naturalHeight;
+  tmpCtx.drawImage(img, 0, 0);
+  const data = tmpCtx.getImageData(0, 0, tmpCanvas.width, tmpCanvas.height).data;
+  let minX = tmpCanvas.width, minY = tmpCanvas.height, maxX = 0, maxY = 0;
+  for (let y = 0; y < tmpCanvas.height; y++) {
+    for (let x = 0; x < tmpCanvas.width; x++) {
+      const i = (y * tmpCanvas.width + x) * 4;
+      if (data[i + 3] > 0) { // alpha > 0
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  const w = maxX - minX + 1;
+  const h = maxY - minY + 1;
+  if (w === 0 || h === 0) return null;
+  // 裁剪到有内容的区域
+  const cropCanvas = document.createElement('canvas');
+  cropCanvas.width = w;
+  cropCanvas.height = h;
+  const cropCtx = cropCanvas.getContext('2d');
+  cropCtx.drawImage(img, -minX, -minY);
+  return { canvas: cropCanvas, w, h };
+}
+
+// ============ 加载资源 ============
+const FRAME_DIR = 'frames/';
+const STANDING_IMG = 'stand.png';
+const SLIDE_IMG = 'slide.png';
+const OBSTACLE_DIR = 'obstacles/';
+const BG_DIR = 'Background/';
+
+// 多层视差背景
+const bgLayers = [
+  { name: 'BG2', img: new Image(), speed: 0.1, file: 'BG2.png' },
+  { name: 'BG',  img: new Image(), speed: 0.3, file: 'BG.png' },
+  { name: 'mid', img: new Image(), speed: 0.5, file: 'mid.png' },
+  { name: 'fore',img: new Image(), speed: 0.8, file: 'fore.png' },
+  { name: 'ground',img: new Image(), speed: 1.0, file: 'foreground.png' }
+];
+bgLayers.forEach(layer => {
+  layer.img.onload = () => { log(layer.name + ' loaded ' + layer.img.naturalWidth + 'x' + layer.img.naturalHeight); checkReady(); };
+  layer.img.onerror = () => log('FAIL ' + layer.name);
+  layer.img.src = BG_DIR + layer.file;
+});
+
+let debugLog = [];
+function log(msg) {
+  debugLog.push(msg);
+  debugEl.textContent = debugLog.join(' | ');
+}
+
+const runFrames = [];
+let runLoaded = 0;
+
+for (let i = 1; i <= RUN_CYCLE; i++) {
+  const img = new Image();
+  img.onload = () => {
+    runLoaded++;
+    log(`run ${i}/${RUN_CYCLE} ok ${img.naturalWidth}x${img.naturalHeight}`);
+    if (runLoaded >= RUN_CYCLE) log('ALL RUN LOADED');
+    checkReady();
+  };
+  img.onerror = () => log(`FAIL frame ${i}`);
+  img.src = FRAME_DIR + 'frame_' + String(i).padStart(4, '0') + '.png';
+  runFrames.push(img);
+}
+
+const standImg = new Image();
+standImg.onload = () => { log(`stand loaded ${standImg.naturalWidth}x${standImg.naturalHeight}`); checkReady(); };
+standImg.onerror = () => log('FAIL stand');
+standImg.src = STANDING_IMG;
+
+const slideImg = new Image();
+slideImg.onload = () => { log(`slide loaded ${slideImg.naturalWidth}x${slideImg.naturalHeight}`); checkReady(); };
+slideImg.onerror = () => log('FAIL slide');
+slideImg.src = SLIDE_IMG;
+
+// 障碍物素材
+const obsGround1 = new Image();
+const obsGround2 = new Image();
+const obsLow = new Image();
+const obsHigh = new Image();
+
+function loadObs(img, url, name) {
+  img.onload = () => { log(`${name} loaded ${img.naturalWidth}x${img.naturalHeight}`); checkReady(); };
+  img.onerror = () => log(`FAIL ${name}`);
+  img.src = OBSTACLE_DIR + url;
+}
+loadObs(obsGround1, 'ground1.png', 'ground1');
+loadObs(obsGround2, 'ground2.png', 'ground2');
+loadObs(obsLow, 'low.png', 'low');
+loadObs(obsHigh, 'high.png', 'high');
+
+let allLoaded = false;
+function checkReady() {
+  if (allLoaded) return;
+  if (runLoaded < RUN_CYCLE) return;
+  if (!standImg.complete || !slideImg.complete) return;
+  if (!obsGround1.complete || !obsGround2.complete || !obsLow.complete || !obsHigh.complete) return;
+  if (!bgLayers.every(l => l.img.complete)) return;
+  log('STARTING GAME');
+  initGame();
+}
+
+// ============ 游戏状态 ============
+const STATE = { WAIT: 0, PLAY: 1, OVER: 2 };
+let state = STATE.WAIT;
+let score = 0, speed = 4.5, lastObsTime = 0;
+// 从 localStorage 读取最高分
+let highScore = parseInt(localStorage.getItem('xiaoke_highscore')) || 0;
+let frameTimer = 0, runFrameIdx = 0, lastTime = 0;
+
+const player = { x: 80, y: 0, vy: 0, grounded: true, ducking: false };
+let obstacles = [];
+let obsNextX = W + 200;
+let groundY = H - 40;
+
+let playerDrawW = 0, playerDrawH = 0;
+let standBounded = null;   // { canvas, w, h }
+let slideBounded = null;   // { canvas, w, h }
+let standDrawW = 0, standDrawH = 0;
+let slideDrawW = 0, slideDrawH = 0;
+
+// ============ 初始化 ============
+function initGame() {
+  const srcW = runFrames[0].naturalWidth;
+  const srcH = runFrames[0].naturalHeight;
+  // 跑步帧略大一些（1.3倍），站立/滑行保持与其他一致
+  playerDrawW = Math.round(srcW * SCALE * 1.3);
+  playerDrawH = Math.round(srcH * SCALE * 1.3);
+
+  standBounded = getBoundedImg(standImg);
+  slideBounded = getBoundedImg(slideImg);
+
+  // 站立/滑行图以跑步帧高度为基准，等比缩放，保证三者视觉一致
+  if (standBounded) {
+    standDrawH = Math.round(playerDrawH * 0.9);
+    standDrawW = Math.round(standBounded.w * (standDrawH / standBounded.h));
+    log(`stand content=${standBounded.w}x${standBounded.h} → render=${standDrawW}x${standDrawH}`);
+  }
+  if (slideBounded) {
+    slideDrawH = Math.round(playerDrawH * 0.60);
+    slideDrawW = Math.round(slideBounded.w * (slideDrawH / slideBounded.h));
+    log(`slide content=${slideBounded.w}x${slideBounded.h} → render=${slideDrawW}x${slideDrawH}`);
+  }
+
+  // 地面线根据最大角色高度决定
+  const maxH = Math.max(playerDrawH, standDrawH, slideDrawH);
+  groundY = H - maxH - 10;
+  log(`player=${playerDrawW}x${playerDrawH} groundY=${groundY}`);
+  resetGame();
+  requestAnimationFrame(loop);
+}
+
+function resetGame() {
+  state = STATE.WAIT;
+  score = 0; speed = 4.5;
+  // highScore 不从 localStorage 重置，保持历史最高
+  obstacles = [];
+  obsNextX = W + 200;
+  lastObsTime = 0; // 重置障碍物计时
+  player.vy = 0; player.grounded = true; player.ducking = false;
+  runFrameIdx = 0; frameTimer = 0;
+}
+
+// ============ 输入 ============
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'ArrowUp') {
+    e.preventDefault();
+    if (state === STATE.WAIT || state === STATE.OVER) { console.log('SPACE pressed, state:', state, 'isWAIT:', state === 0, 'isOVER:', state === 2);
+      resetGame();
+      state = STATE.PLAY;
+      log('STARTED'); console.log('State changed to PLAY'); AudioSystem.play('start');
+    } else if (state === STATE.PLAY && player.grounded) {
+      player.vy = JUMP_FORCE;
+      player.grounded = false;
+      AudioSystem.play('jump');
+    }
+  }
+  if (e.code === 'ArrowDown') {
+    e.preventDefault();
+    if (state === STATE.PLAY) player.ducking = true;
+  }
+});
+document.addEventListener('keyup', e => {
+  if (e.code === 'ArrowDown') player.ducking = false;
+});
+
+// ============ 障碍物 ============
+// 每种障碍物的预设尺寸（基于实际抠图尺寸）
+const OBS_DEFS = {
+  ground1: { w: 35,  h: 45 },   // 93x120 → 约35x45
+  ground2: { w: 50,  h: 43 },   // 147x125 → 约50x43
+  low:     { w: 55,  h: 53 },   // 484x470 → 约55x53（接近正方形）
+  high:    { w: 25,  h: 45 },   // 86x140 → 约25x45（瘦高型）
+};
+
+// 随机在基础尺寸上±20%变化（保持原比例）
+function randomScale(baseW, baseH) {
+  const varRange = 0.4; // ±20%
+  const scale = 1 + (Math.random() - 0.5) * varRange; // 0.8 ~ 1.2
+  return {
+    w: Math.round(baseW * scale),
+    h: Math.round(baseH * scale)
+  };
+}
+
+function spawnObstacleAt(x, forceType) {
+  // 如果指定了 forceType，直接使用；否则随机生成
+  let w, h, y, obsType;
+
+  if (forceType) {
+    // 强制使用指定类型
+    obsType = forceType;
+    if (forceType === 'ground1' || forceType === 'ground2') {
+      const def = OBS_DEFS[forceType];
+      const size = randomScale(def.w, def.h);
+      w = size.w; h = size.h;
+      y = groundY - h;
+    } else if (forceType === 'low') {
+      const def = OBS_DEFS.low;
+      const size = randomScale(def.w, def.h);
+      w = size.w; h = size.h;
+      y = groundY - slideDrawH - h - 5;
+    } else if (forceType === 'high') {
+      const def = OBS_DEFS.high;
+      const size = randomScale(def.w, def.h);
+      w = size.w; h = size.h;
+      y = groundY - playerDrawH - h - 20;
+    }
+  } else {
+    // 随机生成类型
+    const type = Math.random();
+    if (type < 0.58) {
+      // 地面障碍
+      const big = Math.random() < 0.3;
+      const def = big ? OBS_DEFS.ground2 : OBS_DEFS.ground1;
+      const size = randomScale(def.w, def.h);
+      w = size.w; h = size.h;
+      y = groundY - h;
+      obsType = big ? 'ground2' : 'ground1';
+    } else if (type < 0.70) {
+      // 低空飞行障碍
+      const def = OBS_DEFS.low;
+      const size = randomScale(def.w, def.h);
+      w = size.w; h = size.h;
+      y = groundY - slideDrawH - h - 5;
+      obsType = 'low';
+    } else {
+      // 高空飞行障碍
+      const def = OBS_DEFS.high;
+      const size = randomScale(def.w, def.h);
+      w = size.w; h = size.h;
+      y = groundY - playerDrawH - h - 20;
+      obsType = 'high';
+    }
+  }
+  obstacles.push({ x: x, w, h, y, type: obsType });
+}
+
+function spawnObstacle() {
+  // 根据当前速度计算最小安全间隔：确保玩家有至少 1.0 秒的反应时间
+  const reactionTime = 1.0; // 秒
+  const minGap = speed * reactionTime; // 像素
+  const maxGap = minGap * 1.5;
+  const gap = minGap + Math.random() * (maxGap - minGap);
+  obsNextX += gap;
+  spawnObstacleAt(obsNextX);
+
+  // 只有地面障碍物可以组合（30%概率），飞行障碍不组合
+  const lastObs = obstacles[obstacles.length - 1];
+  if (lastObs && Math.random() < 0.3) {
+    // 只有上一个也是地面障碍时才组合，且下一个必须是地面障碍
+    if (lastObs.type === 'ground1' || lastObs.type === 'ground2') {
+      const comboGap = 2 + Math.random() * 5;
+      obsNextX = lastObs.x + lastObs.w + comboGap;
+      // 只生成地面障碍（ground1 或 ground2）
+      const isGround2 = Math.random() < 0.4;
+      spawnObstacleAt(obsNextX, isGround2 ? 'ground2' : 'ground1');
+    }
+  }
+}
+
+function rectsOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function getPlayerRect() {
+  const isSlide = player.ducking && player.grounded;
+  const dw = isSlide ? slideDrawW : playerDrawW;
+  const dh = isSlide ? slideDrawH : playerDrawH;
+  const dy = groundY - dh + player.y;
+  const margin = 10;
+  return { x: player.x + margin, y: dy + margin, w: dw - margin * 2, h: dh - margin * 2 };
+}
+
+// ============ 主循环 ============
+function loop(timestamp) {
+  const dt = Math.min(timestamp - (lastTime || timestamp), 33);
+  lastTime = timestamp;
+  update(dt, timestamp);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function update(dt, timestamp) {
+  if (state !== STATE.PLAY) return;
+
+  frameTimer += dt;
+  if (frameTimer >= 1000 / RUN_FPS) {
+    frameTimer -= 1000 / RUN_FPS;
+    runFrameIdx = (runFrameIdx + 1) % RUN_CYCLE;
+  }
+
+  player.vy += GRAVITY;
+  player.y += player.vy;
+  if (player.y >= 0) { player.y = 0; player.vy = 0; player.grounded = true; }
+
+  // 障碍物生成：按时间间隔生成，确保玩家有足够反应时间
+  if (state === STATE.PLAY && obstacles.length === 0) {
+    // 第一个障碍物立即生成
+    spawnObstacle();
+    lastObsTime = timestamp;
+  } else {
+    const timeSinceLastObs = (timestamp - lastObsTime) / 1000; // 秒
+    if (timeSinceLastObs >= 0.7) { // 至少 0.7 秒才允许生成新障碍
+      spawnObstacle();
+      lastObsTime = timestamp;
+    }
+  }
+
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    obstacles[i].x -= speed;
+    if (obstacles[i].x + obstacles[i].w < 0) obstacles.splice(i, 1);
+  }
+
+  const pRect = getPlayerRect();
+  for (const obs of obstacles) {
+    if (rectsOverlap(pRect, obs)) {
+      state = STATE.OVER;
+      if (score > highScore) {
+        highScore = score;
+        localStorage.setItem('xiaoke_highscore', Math.floor(highScore));
+      }
+      AudioSystem.play('hit');
+      log(`OVER score=${Math.floor(score)}`);
+      return;
+    }
+  }
+
+  score += dt * 0.05;
+  speed = 4.5 + Math.floor(score / 300) * 0.3;
+}
+
+// ============ 绘制 ============
+let bgOffset = 0; // 背景滚动偏移（连续小数偏移，避免按帧跳跃）
+
+function draw() {
+  // 绘制多层视差背景
+  // 每次调用按 dt 比例增加偏移，确保跨层对齐不跳帧
+  let hasAnyBG = false;
+  bgLayers.forEach(layer => {
+    if (!layer.img.complete) return;
+    hasAnyBG = true;
+    const imgW = layer.img.naturalWidth;
+    const imgH = layer.img.naturalHeight;
+    const drawH = H;
+    const drawW = (imgW / imgH) * drawH;
+    // 按层速度累加，避免统一在 1920 取模导致不同宽度边界错位
+    bgOffset += speed * 0.15 * layer.speed;
+    const layerOffset = bgOffset % drawW;
+    // 绘制两层实现无缝滚动
+    ctx.drawImage(layer.img, -layerOffset, 0, drawW, drawH);
+    ctx.drawImage(layer.img, drawW - layerOffset, 0, drawW, drawH);
+  });
+  if (!hasAnyBG) {
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = '#535353';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, groundY);
+    ctx.lineTo(W, groundY);
+    ctx.stroke();
+    return;
+  }
+
+  ctx.strokeStyle = '#535353';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, groundY);
+  ctx.lineTo(W, groundY);
+  ctx.stroke();
+
+  drawPlayer();
+
+  // 障碍物（用图片绘制）
+  for (const obs of obstacles) {
+    let img;
+    switch (obs.type) {
+      case 'ground1': img = obsGround1; break;
+      case 'ground2': img = obsGround2; break;
+      case 'low': img = obsLow; break;
+      case 'high': img = obsHigh; break;
+      default: img = obsGround1;
+    }
+    if (img && img.complete) {
+      ctx.drawImage(img, obs.x, obs.y, obs.w, obs.h);
+    } else {
+      ctx.fillStyle = '#535353';
+      ctx.fillRect(obs.x, obs.y, obs.w, obs.h);
+    }
+  }
+
+  ctx.fillStyle = '#535353';
+  ctx.font = '18px Courier New';
+  ctx.textAlign = 'right';
+  ctx.fillText(`Score: ${Math.floor(score)}`, W - 20, 30);
+  if (highScore > 0) {
+    ctx.font = '14px Courier New';
+    ctx.fillText(`HI: ${Math.floor(highScore)}`, W - 20, 50);
+  }
+
+  if (state === STATE.WAIT) drawCenterText('鲨克快跑', '按空格键开始');
+  else if (state === STATE.OVER) drawCenterText('GAME OVER', '按空格键重试');
+}
+
+function drawPlayer() {
+  const px = player.x;
+
+  if (state === STATE.WAIT) {
+    if (standBounded) {
+      ctx.drawImage(standBounded.canvas, px, groundY - standDrawH, standDrawW, standDrawH);
+    }
+    return;
+  }
+
+  const isSlide = player.ducking && player.grounded;
+
+  if (isSlide && slideBounded) {
+    ctx.drawImage(slideBounded.canvas, px, groundY - slideDrawH, slideDrawW, slideDrawH);
+    return;
+  }
+
+  // 跑步 / 跳跃
+  const img = runFrames[runFrameIdx];
+  if (!img || !img.complete) {
+    ctx.fillStyle = 'red';
+    ctx.fillRect(px, groundY - playerDrawH, playerDrawW, playerDrawH);
+    return;
+  }
+  const dy = groundY - playerDrawH + player.y;
+  ctx.drawImage(img, px, dy, playerDrawW, playerDrawH);
+}
+
+function drawCenterText(line1, line2) {
+  ctx.fillStyle = '#2d7ff9';
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 32px Courier New';
+  ctx.fillText(line1, W / 2, H / 2 - 10);
+  ctx.font = '16px Courier New';
+  ctx.fillText(line2, W / 2, H / 2 + 20);
+}
+
+// ============ 音频系统 ============
+const AudioSystem = {
+  bgm: null,
+  sounds: {},
+  enabled: true,
+  
+  init() {
+    // 加载背景音乐
+    this.bgm = new Audio('audio/background.mp3');
+    this.bgm.loop = true;
+    this.bgm.volume = 0.3;
+    
+    // 加载音效
+    this.sounds.jump = new Audio('audio/jump.mp3');
+    this.sounds.slide = new Audio('audio/slide.mp3');
+    this.sounds.hit = new Audio('audio/hit.mp3');
+    this.sounds.start = new Audio('audio/start.mp3');
+  },
+  
+  playBGM() {
+    if (!this.enabled || !this.bgm) return;
+    this.bgm.currentTime = 0;
+    this.bgm.play().catch(e => console.log('BGM play failed:', e));
+  },
+  
+  stopBGM() {
+    if (this.bgm) this.bgm.pause();
+  },
+  
+  play(name) {
+    if (!this.enabled || !this.sounds[name]) return;
+    const sound = this.sounds[name].cloneNode();
+    sound.volume = 0.5;
+    sound.play().catch(e => console.log('Sound play failed:', e));
+  },
+  
+  toggle() {
+    this.enabled = !this.enabled;
+    if (!this.enabled) this.stopBGM();
+    else this.playBGM();
+    return this.enabled;
+  }
+};
+
+// 用户交互后启动音频（浏览器要求）
+document.addEventListener('keydown', function initAudio() {
+  if (!AudioSystem.bgm) {
+    AudioSystem.init();
+    AudioSystem.playBGM();
+  }
+  document.removeEventListener('keydown', initAudio);
+}, { once: true });
+</script>
+</body>
+</html>
