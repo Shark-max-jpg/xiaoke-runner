@@ -355,7 +355,7 @@ function loop(timestamp) {
   const dt = Math.min(timestamp - (lastTime || timestamp), 33);
   lastTime = timestamp;
   update(dt, timestamp);
-  draw();
+  draw(dt);
   requestAnimationFrame(loop);
 }
 
@@ -411,9 +411,10 @@ function update(dt, timestamp) {
 // ============ 绘制 ============
 let bgOffset = 0; // 背景滚动偏移（连续小数偏移，避免按帧跳跃）
 
-function draw() {
+function draw(dt) {
   // 绘制多层视差背景
-  // 每次调用按 dt 比例增加偏移，确保跨层对齐不跳帧
+  // 使用 dt（毫秒）归一化，避免高刷新率显示器让游戏变快
+  const ms = dt || 16.67;
   let hasAnyBG = false;
   bgLayers.forEach(layer => {
     if (!layer.img.complete) return;
@@ -422,8 +423,8 @@ function draw() {
     const imgH = layer.img.naturalHeight;
     const drawH = H;
     const drawW = (imgW / imgH) * drawH;
-    // 按层速度累加，避免统一在 1920 取模导致不同宽度边界错位
-    bgOffset += speed * 0.15 * layer.speed;
+    // 按时间和层速度累加偏移
+    bgOffset += speed * 0.15 * layer.speed * (ms / 16.67);
     const layerOffset = bgOffset % drawW;
     // 绘制两层实现无缝滚动
     ctx.drawImage(layer.img, -layerOffset, 0, drawW, drawH);
