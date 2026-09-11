@@ -45,8 +45,8 @@ canvas.height = H;
 const SCALE = 0.085;
 const RUN_CYCLE = 18;
 const RUN_FPS = 24;
-const GRAVITY = 0.55;
-const JUMP_FORCE = -13.5;
+const GRAVITY = 0.38;
+const JUMP_FORCE = -10.0;
 
 // ============ 工具：扫描图片非透明像素的边界 ============
 function getBoundedImg(img) {
@@ -163,7 +163,7 @@ function checkReady() {
 // ============ 游戏状态 ============
 const STATE = { WAIT: 0, PLAY: 1, OVER: 2 };
 let state = STATE.WAIT;
-let score = 0, speed = 4.5, lastObsTime = 0;
+let score = 0, speed = 6.3, lastObsTime = 0;
 // 从 localStorage 读取最高分
 let highScore = parseInt(localStorage.getItem('xiaoke_highscore')) || 0;
 let frameTimer = 0, runFrameIdx = 0;
@@ -212,7 +212,7 @@ function initGame() {
 
 function resetGame() {
   state = STATE.WAIT;
-  score = 0; speed = 4.5;
+  score = 0; speed = 6.3;
   // highScore 不从 localStorage 重置，保持历史最高
   obstacles = [];
   obsNextX = W + 200;
@@ -318,8 +318,11 @@ function spawnObstacleAt(x, forceType) {
 
 function spawnObstacle() {
   // 根据当前速度计算最小安全间隔：确保玩家有至少 1.0 秒的反应时间
+  // speed 语义为「60Hz 基准下的每帧像素」，故每秒移动 speed * 60 像素
+  // 高刷新率下已按 dt 归一化，因此用 60 帧基准换算间隔
   const reactionTime = 1.0; // 秒
-  const minGap = speed * reactionTime; // 像素
+  const FPS_REF = 60;
+  const minGap = speed * FPS_REF * reactionTime; // 像素：至少让玩家有 reactionTime 秒的缓冲
   const maxGap = minGap * 1.5;
   const gap = minGap + Math.random() * (maxGap - minGap);
   obsNextX += gap;
@@ -388,8 +391,10 @@ function update(dt, timestamp) {
     }
   }
 
+  // 障碍物移动：按 dt 归一化到 60Hz 基准，避免高刷新率显示器下速度异常
+  const norm = dt / 16.67;
   for (let i = obstacles.length - 1; i >= 0; i--) {
-    obstacles[i].x -= speed;
+    obstacles[i].x -= speed * norm;
     if (obstacles[i].x + obstacles[i].w < 0) obstacles.splice(i, 1);
   }
 
@@ -408,7 +413,7 @@ function update(dt, timestamp) {
   }
 
   score += dt * 0.05;
-  speed = 4.5 + Math.floor(score / 300) * 0.3;
+  speed = 7.5 + Math.floor(score / 300) * 0.3;
 }
 
 // ============ 绘制 ============
