@@ -45,7 +45,7 @@ canvas.height = H;
 const SCALE = 0.085;
 const RUN_CYCLE = 18;
 const RUN_FPS = 24;
-const GRAVITY = 0.38;
+const GRAVITY = 0.30;
 const JUMP_FORCE = -10.0;
 
 // ============ 工具：扫描图片非透明像素的边界 ============
@@ -532,37 +532,37 @@ const AudioSystem = {
   bgm: null,
   sounds: {},
   enabled: true,
-  
+
   init() {
     // 加载背景音乐
     this.bgm = new Audio('audio/background.mp3');
     this.bgm.loop = true;
     this.bgm.volume = 0.3;
-    
+
     // 加载音效
     this.sounds.jump = new Audio('audio/jump.mp3');
     this.sounds.slide = new Audio('audio/slide.mp3');
     this.sounds.hit = new Audio('audio/hit.mp3');
     this.sounds.start = new Audio('audio/start.mp3');
   },
-  
+
   playBGM() {
     if (!this.enabled || !this.bgm) return;
     this.bgm.currentTime = 0;
     this.bgm.play().catch(e => console.log('BGM play failed:', e));
   },
-  
+
   stopBGM() {
     if (this.bgm) this.bgm.pause();
   },
-  
+
   play(name) {
     if (!this.enabled || !this.sounds[name]) return;
     const sound = this.sounds[name].cloneNode();
     sound.volume = 0.5;
     sound.play().catch(e => console.log('Sound play failed:', e));
   },
-  
+
   toggle() {
     this.enabled = !this.enabled;
     if (!this.enabled) this.stopBGM();
