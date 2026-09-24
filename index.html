@@ -47,6 +47,7 @@ const RUN_CYCLE = 18;
 const RUN_FPS = 24;
 const GRAVITY = 0.30;
 const JUMP_FORCE = -10.0;
+const SLIDE_LOCK_FRAMES = 18;  // 急降滑行最短持续帧数（0.3 秒 @60FPS）
 
 // ============ 工具：扫描图片非透明像素的边界 ============
 function getBoundedImg(img) {
@@ -168,7 +169,7 @@ let score = 0, speed = 6.3, lastObsTime = 0;
 let highScore = parseInt(localStorage.getItem('xiaoke_highscore')) || 0;
 let frameTimer = 0, runFrameIdx = 0;
 
-const player = { x: 80, y: 0, vy: 0, grounded: true, ducking: false };
+const player = { x: 80, y: 0, vy: 0, grounded: true, ducking: false, duckHeld: false, slideTimer: 0 };
 let obstacles = [];
 let obsNextX = W + 200;
 let groundY = H - 40;
@@ -218,6 +219,7 @@ function resetGame() {
   obsNextX = W + 200;
   lastObsTime = 0; // 重置障碍物计时
   player.vy = 0; player.grounded = true; player.ducking = false;
+  player.duckHeld = false; player.slideTimer = 0;
   runFrameIdx = 0; frameTimer = 0;
 }
 
@@ -238,16 +240,22 @@ document.addEventListener('keydown', e => {
   if (e.code === 'ArrowDown') {
     e.preventDefault();
     if (state === STATE.PLAY) {
+      player.duckHeld = true;
       if (!player.grounded) {
-        // 空中按 ↓ 急降：直接吸附到地面，取消滞空
+        // 空中按 ↓ 急降：吸附到地面并立即进入滑行，锁定最短滑行时长
         player.y = 0; player.vy = 0; player.grounded = true;
+        player.slideTimer = SLIDE_LOCK_FRAMES;
       }
       player.ducking = true;
     }
   }
 });
 document.addEventListener('keyup', e => {
-  if (e.code === 'ArrowDown') player.ducking = false;
+  if (e.code === 'ArrowDown') {
+    player.duckHeld = false;
+    // 急降滑行有最短持续时间，锁定期内松手也保持滑行
+    if (player.slideTimer <= 0) player.ducking = false;
+  }
 });
 
 // ============ 障碍物 ============
@@ -383,6 +391,12 @@ function update(dt, timestamp) {
   player.vy += GRAVITY;
   player.y += player.vy;
   if (player.y >= 0) { player.y = 0; player.vy = 0; player.grounded = true; }
+
+  // 急降滑行锁定倒计时：锁定期满且未按住时才解除滑行
+  if (player.slideTimer > 0) {
+    player.slideTimer--;
+    if (player.slideTimer <= 0 && !player.duckHeld) player.ducking = false;
+  }
 
   // 障碍物生成：按时间间隔生成，确保玩家有足够反应时间
   if (state === STATE.PLAY && obstacles.length === 0) {
