@@ -80,7 +80,7 @@ xiaoke-runner/
 ├── index.html            # 游戏本体（HTML + CSS + JS 全在这）
 ├── landing.html          # 落地页（游戏入口）
 ├── .github/workflows/    # GitHub Pages 自动部署
-├── frames/               # 跑步动画 71 帧 PNG
+├── frames/               # 跑步动画 18 帧 PNG
 ├── obstacles/            # 障碍物贴图
 ├── Background/           # 5 层视差背景
 ├── audio/                # BGM 与音效
