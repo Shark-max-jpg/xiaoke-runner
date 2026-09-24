@@ -3,9 +3,7 @@
 一个纯前端的像素风跑酷小游戏。扮演一只白鲨，在会滚动的星云赛博背景里一路向前，跳过障碍、滑过低空物，跑到分高为止。
 
 <p align="center">
-  <a href="https://xiaoke-runner-bntm.vercel.app">🎮 在线试玩（Vercel）</a> ·
-  <a href="https://cdn.jsdelivr.net/gh/Shark-max-jpg/xiaoke-runner@gh-pages/index.html">jsDelivr</a> ·
-  <a href="https://shark-max-jpg.github.io/xiaoke-runner/">GitHub Pages</a>
+  <a href="https://shark-max-jpg.github.io/xiaoke-runner/">🎮 在线试玩</a>
 </p>
 
 ---
@@ -80,7 +78,7 @@ const JUMP_FORCE = -10.0;  // 起跳初速度（绝对值越大跳得越高）
 ```
 xiaoke-runner/
 ├── index.html            # 游戏本体（HTML + CSS + JS 全在这）
-├── landing.html          # 落地页（多个 CDN 入口，供 Vercel 部署）
+├── landing.html          # 落地页（游戏入口）
 ├── .github/workflows/    # GitHub Pages 自动部署
 ├── frames/               # 跑步动画 71 帧 PNG
 ├── obstacles/            # 障碍物贴图
@@ -88,7 +86,6 @@ xiaoke-runner/
 ├── audio/                # BGM 与音效
 ├── stand.png             # 站立贴图
 ├── slide.png             # 滑行贴图
-└── .vercel/              # Vercel 项目配置
 ```
 
 ## 🚀 本地运行
@@ -108,16 +105,13 @@ python -m http.server 8000
 
 ## ☁️ 在线部署
 
-项目支持两条部署线路，都是自动的：
+游戏部署在 GitHub Pages 上：
 
 | 平台 | 分支 | 配置文件 | 地址 |
 |:---|:---|:---|:---|
-| **Vercel** | `gh-pages` | `.vercel/project.json` | https://xiaoke-runner-bntm.vercel.app |
 | **GitHub Pages** | `gh-pages` | `.github/workflows/pages-build-deployment.yml` | https://shark-max-jpg.github.io/xiaoke-runner/ |
 
-向 `gh-pages` 分支 push 即触发两个平台重新部署。
-
-`landing.html` 额外提供 jsDelivr / ghfast / gh-proxy 三个 CDN 入口，作为国内访问 GitHub Pages 的备用线路。
+向 `gh-pages` 分支 push 即触发自动重新部署。
 
 ## 🛠️ 技术栈
 
