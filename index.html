@@ -28,7 +28,7 @@
 </head>
 <body>
 <canvas id="game"></canvas>
-<div id="hint">按空格键开始 / 跳跃 &nbsp;|&nbsp; ↓ 滑行</div>
+<div id="hint">按空格键开始 / 跳跃 &nbsp;|&nbsp; ↓ 滑行 / 空中急降</div>
 <div id="debug"></div>
 <div id="tip">如果游戏速度异常，请按 Ctrl+Shift+R 强制刷新</div>
 
@@ -237,7 +237,13 @@ document.addEventListener('keydown', e => {
   }
   if (e.code === 'ArrowDown') {
     e.preventDefault();
-    if (state === STATE.PLAY) player.ducking = true;
+    if (state === STATE.PLAY) {
+      if (!player.grounded) {
+        // 空中按 ↓ 急降：直接吸附到地面，取消滞空
+        player.y = 0; player.vy = 0; player.grounded = true;
+      }
+      player.ducking = true;
+    }
   }
 });
 document.addEventListener('keyup', e => {
