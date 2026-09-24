@@ -45,9 +45,11 @@ canvas.height = H;
 const SCALE = 0.085;
 const RUN_CYCLE = 18;
 const RUN_FPS = 24;
-const GRAVITY = 0.30;
-const JUMP_FORCE = -10.0;
+const GRAVITY = 0.85;
+const JUMP_FORCE = -15.5;
 const SLIDE_LOCK_FRAMES = 18;  // 急降滑行最短持续帧数（0.3 秒 @60FPS）
+const FAST_FALL_SPEED = 10.0;  // 急降速度（像素/帧，@60FPS 基准）
+const FPS_REF = 60;           // 归一化基准帧率：所有「每帧」参数都以此为参照
 
 // ============ 工具：扫描图片非透明像素的边界 ============
 function getBoundedImg(img) {
@@ -169,7 +171,7 @@ let score = 0, speed = 6.3, lastObsTime = 0;
 let highScore = parseInt(localStorage.getItem('xiaoke_highscore')) || 0;
 let frameTimer = 0, runFrameIdx = 0;
 
-const player = { x: 80, y: 0, vy: 0, grounded: true, ducking: false, duckHeld: false, slideTimer: 0 };
+const player = { x: 80, y: 0, vy: 0, grounded: true, ducking: false, duckHeld: false, slideTimer: 0, fastFall: false };
 let obstacles = [];
 let obsNextX = W + 200;
 let groundY = H - 40;
@@ -220,6 +222,7 @@ function resetGame() {
   lastObsTime = 0; // 重置障碍物计时
   player.vy = 0; player.grounded = true; player.ducking = false;
   player.duckHeld = false; player.slideTimer = 0;
+  player.fastFall = false;
   runFrameIdx = 0; frameTimer = 0;
 }
 
@@ -241,10 +244,10 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
     if (state === STATE.PLAY) {
       player.duckHeld = true;
-      if (!player.grounded) {
-        // 空中按 ↓ 急降：吸附到地面并立即进入滑行，锁定最短滑行时长
-        player.y = 0; player.vy = 0; player.grounded = true;
-        player.slideTimer = SLIDE_LOCK_FRAMES;
+      if (!player.grounded && !player.fastFall) {
+        // 空中按 ↓ 急降：进入快速下降动画，落地后自动转入滑行
+        player.fastFall = true;
+        player.vy = 0;
       }
       player.ducking = true;
     }
@@ -253,8 +256,8 @@ document.addEventListener('keydown', e => {
 document.addEventListener('keyup', e => {
   if (e.code === 'ArrowDown') {
     player.duckHeld = false;
-    // 急降滑行有最短持续时间，锁定期内松手也保持滑行
-    if (player.slideTimer <= 0) player.ducking = false;
+    // 急降中松手不取消滑行姿态，只等落地后再解除
+    if (player.slideTimer <= 0 && !player.fastFall) player.ducking = false;
   }
 });
 
@@ -388,13 +391,26 @@ function update(dt, timestamp) {
     runFrameIdx = (runFrameIdx + 1) % RUN_CYCLE;
   }
 
-  player.vy += GRAVITY;
-  player.y += player.vy;
-  if (player.y >= 0) { player.y = 0; player.vy = 0; player.grounded = true; }
+  // 跳跃/急降/滑行锁定：按 dt 归一化到 60Hz 基准，避免高刷新率显示器让手感不一致
+  const norm = dt / 16.67;
+  if (player.fastFall) {
+    // 急降：匀速下降，速度可调
+    player.y += FAST_FALL_SPEED * norm;
+    if (player.y >= 0) {
+      player.y = 0; player.vy = 0; player.grounded = true;
+      player.fastFall = false;
+      // 滑行锁定从落地这一帧才开始计时
+      player.slideTimer = SLIDE_LOCK_FRAMES;
+    }
+  } else {
+    player.vy += GRAVITY * norm;
+    player.y += player.vy * norm;
+    if (player.y >= 0) { player.y = 0; player.vy = 0; player.grounded = true; }
+  }
 
-  // 急降滑行锁定倒计时：锁定期满且未按住时才解除滑行
+  // 急降滑行锁定倒计时：按 dt 归一化，锁定期满且未按住时才解除滑行
   if (player.slideTimer > 0) {
-    player.slideTimer--;
+    player.slideTimer -= norm;
     if (player.slideTimer <= 0 && !player.duckHeld) player.ducking = false;
   }
 
@@ -412,7 +428,6 @@ function update(dt, timestamp) {
   }
 
   // 障碍物移动：按 dt 归一化到 60Hz 基准，避免高刷新率显示器下速度异常
-  const norm = dt / 16.67;
   for (let i = obstacles.length - 1; i >= 0; i--) {
     obstacles[i].x -= speed * norm;
     if (obstacles[i].x + obstacles[i].w < 0) obstacles.splice(i, 1);
@@ -521,9 +536,16 @@ function drawPlayer() {
   }
 
   const isSlide = player.ducking && player.grounded;
+  // 急降过程中用滑行姿势朝下压低身形，落地瞬间衔接滑行
+  const isFastFall = player.fastFall && slideBounded;
 
   if (isSlide && slideBounded) {
     ctx.drawImage(slideBounded.canvas, px, groundY - slideDrawH, slideDrawW, slideDrawH);
+    return;
+  }
+  if (isFastFall) {
+    const dy = groundY - playerDrawH + player.y;
+    ctx.drawImage(slideBounded.canvas, px, dy, slideDrawW, slideDrawH);
     return;
   }
 
