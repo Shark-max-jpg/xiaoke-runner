@@ -19,7 +19,7 @@
 | 按键 | 作用 |
 |:---:|---|
 | `Space` / `↑` | 开始游戏 · 跳跃（仅在地面时有效） |
-| `↓` | 滑行（仅在地面时有效） |
+| `↓` | 滑行（地面）· 空中急降（快速落地并衔接滑行） |
 
 - 撞击任何障碍物即结束
 - 分数随时间累积，跑到 300 分速度会提升一级，之后越来越快
@@ -40,12 +40,17 @@
 调手感直接改 `index.html` 顶部的配置区：
 
 ```js
-const SCALE = 0.085;       // 角色渲染缩放
-const RUN_CYCLE = 18;      // 跑步动画帧数
-const RUN_FPS = 24;        // 跑步动画帧率
-const GRAVITY = 0.30;      // 重力加速度（越小滞空越久）
-const JUMP_FORCE = -10.0;  // 起跳初速度（绝对值越大跳得越高）
+const SCALE = 0.085;        // 角色渲染缩放
+const RUN_CYCLE = 18;       // 跑步动画帧数
+const RUN_FPS = 24;         // 跑步动画帧率
+const GRAVITY = 0.85;       // 重力加速度（越大跳得越矮、滞空越短）
+const JUMP_FORCE = -15.5;   // 起跳初速度（绝对值越大跳得越高）
+const FAST_FALL_SPEED = 10.0; // 空中按 ↓ 的下降速度
+const SLIDE_LOCK_FRAMES = 18; // 落地后最短滑行帧数
+const FPS_REF = 60;         // 物理归一化基准帧率
 ```
+
+**所有物理量按 `dt` 归一化到 60Hz 基准**，所以 30 / 60 / 120 / 144 / 240Hz 屏幕手感一致。
 
 障碍物尺寸在 `OBS_DEFS` 里定义，每种障碍在基础尺寸上会随机 ±20% 变化。
 
@@ -53,7 +58,10 @@ const JUMP_FORCE = -10.0;  // 起跳初速度（绝对值越大跳得越高）
 
 | 想要 | 怎么调 |
 |:---|:---|
-| 跳得更高 / 滞空更久 | `JUMP_FORCE` 绝对值调大，或 `GRAVITY` 调小 |
+| 跳得更高 | `JUMP_FORCE` 绝对值调大（滞空也会变长） |
+| 滞空更短 / 落地更快 | `GRAVITY` 调大（如需保持高度，`JUMP_FORCE` 按 √ 倍率同步调大） |
+| 空中下坠更快 | 调大 `FAST_FALL_SPEED` |
+| 落地后滑得更久 | 调大 `SLIDE_LOCK_FRAMES` |
 | 反应时间更宽松 | 调大 `spawnObstacle()` 里的 `reactionTime`（默认 1.0 秒） |
 | 障碍更密集 | 调小 `reactionTime`，或调大 `update()` 里的 `0.7` 秒生成上限 |
 | 角色更大 | 调大 `SCALE` |

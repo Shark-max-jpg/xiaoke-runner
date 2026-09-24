@@ -23,12 +23,14 @@
   }
   #hint { margin-top: 12px; color: #535353; font-size: 14px; }
   #debug { margin-top: 6px; color: #999; font-size: 11px; }
+  #tip { margin-top: 8px; color: #ff6b6b; font-size: 12px; }
 </style>
 </head>
 <body>
 <canvas id="game"></canvas>
-<div id="hint">按空格键开始 / 跳跃 &nbsp;|&nbsp; ↓ 滑行</div>
+<div id="hint">按空格键开始 / 跳跃 &nbsp;|&nbsp; ↓ 滑行 / 空中急降</div>
 <div id="debug"></div>
+<div id="tip">如果游戏速度异常，请按 Ctrl+Shift+R 强制刷新</div>
 
 <script>
 const canvas = document.getElementById('game');
@@ -43,8 +45,11 @@ canvas.height = H;
 const SCALE = 0.085;
 const RUN_CYCLE = 18;
 const RUN_FPS = 24;
-const GRAVITY = 0.55;
-const JUMP_FORCE = -13.5;
+const GRAVITY = 0.85;
+const JUMP_FORCE = -15.5;
+const SLIDE_LOCK_FRAMES = 18;  // 急降滑行最短持续帧数（0.3 秒 @60FPS）
+const FAST_FALL_SPEED = 10.0;  // 急降速度（像素/帧，@60FPS 基准）
+const FPS_REF = 60;           // 归一化基准帧率：所有「每帧」参数都以此为参照
 
 // ============ 工具：扫描图片非透明像素的边界 ============
 function getBoundedImg(img) {
@@ -161,12 +166,12 @@ function checkReady() {
 // ============ 游戏状态 ============
 const STATE = { WAIT: 0, PLAY: 1, OVER: 2 };
 let state = STATE.WAIT;
-let score = 0, speed = 4.5, lastObsTime = 0;
+let score = 0, speed = 6.3, lastObsTime = 0;
 // 从 localStorage 读取最高分
 let highScore = parseInt(localStorage.getItem('xiaoke_highscore')) || 0;
-let frameTimer = 0, runFrameIdx = 0, lastTime = 0;
+let frameTimer = 0, runFrameIdx = 0;
 
-const player = { x: 80, y: 0, vy: 0, grounded: true, ducking: false };
+const player = { x: 80, y: 0, vy: 0, grounded: true, ducking: false, duckHeld: false, slideTimer: 0, fastFall: false };
 let obstacles = [];
 let obsNextX = W + 200;
 let groundY = H - 40;
@@ -210,12 +215,14 @@ function initGame() {
 
 function resetGame() {
   state = STATE.WAIT;
-  score = 0; speed = 4.5;
+  score = 0; speed = 6.3;
   // highScore 不从 localStorage 重置，保持历史最高
   obstacles = [];
   obsNextX = W + 200;
   lastObsTime = 0; // 重置障碍物计时
   player.vy = 0; player.grounded = true; player.ducking = false;
+  player.duckHeld = false; player.slideTimer = 0;
+  player.fastFall = false;
   runFrameIdx = 0; frameTimer = 0;
 }
 
@@ -235,11 +242,23 @@ document.addEventListener('keydown', e => {
   }
   if (e.code === 'ArrowDown') {
     e.preventDefault();
-    if (state === STATE.PLAY) player.ducking = true;
+    if (state === STATE.PLAY) {
+      player.duckHeld = true;
+      if (!player.grounded && !player.fastFall) {
+        // 空中按 ↓ 急降：进入快速下降动画，落地后自动转入滑行
+        player.fastFall = true;
+        player.vy = 0;
+      }
+      player.ducking = true;
+    }
   }
 });
 document.addEventListener('keyup', e => {
-  if (e.code === 'ArrowDown') player.ducking = false;
+  if (e.code === 'ArrowDown') {
+    player.duckHeld = false;
+    // 急降中松手不取消滑行姿态，只等落地后再解除
+    if (player.slideTimer <= 0 && !player.fastFall) player.ducking = false;
+  }
 });
 
 // ============ 障碍物 ============
@@ -316,8 +335,11 @@ function spawnObstacleAt(x, forceType) {
 
 function spawnObstacle() {
   // 根据当前速度计算最小安全间隔：确保玩家有至少 1.0 秒的反应时间
+  // speed 语义为「60Hz 基准下的每帧像素」，故每秒移动 speed * 60 像素
+  // 高刷新率下已按 dt 归一化，因此用 60 帧基准换算间隔
   const reactionTime = 1.0; // 秒
-  const minGap = speed * reactionTime; // 像素
+  const FPS_REF = 60;
+  const minGap = speed * FPS_REF * reactionTime; // 像素：至少让玩家有 reactionTime 秒的缓冲
   const maxGap = minGap * 1.5;
   const gap = minGap + Math.random() * (maxGap - minGap);
   obsNextX += gap;
@@ -351,11 +373,12 @@ function getPlayerRect() {
 }
 
 // ============ 主循环 ============
+let lastTimestamp = 0;
 function loop(timestamp) {
-  const dt = Math.min(timestamp - (lastTime || timestamp), 33);
-  lastTime = timestamp;
+  const dt = Math.min(timestamp - lastTimestamp, 33);
+  lastTimestamp = timestamp;
   update(dt, timestamp);
-  draw();
+  draw(dt);
   requestAnimationFrame(loop);
 }
 
@@ -368,9 +391,28 @@ function update(dt, timestamp) {
     runFrameIdx = (runFrameIdx + 1) % RUN_CYCLE;
   }
 
-  player.vy += GRAVITY;
-  player.y += player.vy;
-  if (player.y >= 0) { player.y = 0; player.vy = 0; player.grounded = true; }
+  // 跳跃/急降/滑行锁定：按 dt 归一化到 60Hz 基准，避免高刷新率显示器让手感不一致
+  const norm = dt / 16.67;
+  if (player.fastFall) {
+    // 急降：匀速下降，速度可调
+    player.y += FAST_FALL_SPEED * norm;
+    if (player.y >= 0) {
+      player.y = 0; player.vy = 0; player.grounded = true;
+      player.fastFall = false;
+      // 滑行锁定从落地这一帧才开始计时
+      player.slideTimer = SLIDE_LOCK_FRAMES;
+    }
+  } else {
+    player.vy += GRAVITY * norm;
+    player.y += player.vy * norm;
+    if (player.y >= 0) { player.y = 0; player.vy = 0; player.grounded = true; }
+  }
+
+  // 急降滑行锁定倒计时：按 dt 归一化，锁定期满且未按住时才解除滑行
+  if (player.slideTimer > 0) {
+    player.slideTimer -= norm;
+    if (player.slideTimer <= 0 && !player.duckHeld) player.ducking = false;
+  }
 
   // 障碍物生成：按时间间隔生成，确保玩家有足够反应时间
   if (state === STATE.PLAY && obstacles.length === 0) {
@@ -385,8 +427,9 @@ function update(dt, timestamp) {
     }
   }
 
+  // 障碍物移动：按 dt 归一化到 60Hz 基准，避免高刷新率显示器下速度异常
   for (let i = obstacles.length - 1; i >= 0; i--) {
-    obstacles[i].x -= speed;
+    obstacles[i].x -= speed * norm;
     if (obstacles[i].x + obstacles[i].w < 0) obstacles.splice(i, 1);
   }
 
@@ -405,15 +448,16 @@ function update(dt, timestamp) {
   }
 
   score += dt * 0.05;
-  speed = 4.5 + Math.floor(score / 300) * 0.3;
+  speed = 7.5 + Math.floor(score / 300) * 0.3;
 }
 
 // ============ 绘制 ============
 let bgOffset = 0; // 背景滚动偏移（连续小数偏移，避免按帧跳跃）
 
-function draw() {
+function draw(dt) {
   // 绘制多层视差背景
-  // 每次调用按 dt 比例增加偏移，确保跨层对齐不跳帧
+  // 使用 dt（毫秒）归一化，避免高刷新率显示器让游戏变快
+  const ms = dt || 16.67;
   let hasAnyBG = false;
   bgLayers.forEach(layer => {
     if (!layer.img.complete) return;
@@ -422,8 +466,8 @@ function draw() {
     const imgH = layer.img.naturalHeight;
     const drawH = H;
     const drawW = (imgW / imgH) * drawH;
-    // 按层速度累加，避免统一在 1920 取模导致不同宽度边界错位
-    bgOffset += speed * 0.15 * layer.speed;
+    // 按时间和层速度累加偏移
+    bgOffset += speed * 0.15 * layer.speed * (ms / 16.67);
     const layerOffset = bgOffset % drawW;
     // 绘制两层实现无缝滚动
     ctx.drawImage(layer.img, -layerOffset, 0, drawW, drawH);
@@ -492,9 +536,16 @@ function drawPlayer() {
   }
 
   const isSlide = player.ducking && player.grounded;
+  // 急降过程中用滑行姿势朝下压低身形，落地瞬间衔接滑行
+  const isFastFall = player.fastFall && slideBounded;
 
   if (isSlide && slideBounded) {
     ctx.drawImage(slideBounded.canvas, px, groundY - slideDrawH, slideDrawW, slideDrawH);
+    return;
+  }
+  if (isFastFall) {
+    const dy = groundY - playerDrawH + player.y;
+    ctx.drawImage(slideBounded.canvas, px, dy, slideDrawW, slideDrawH);
     return;
   }
 
@@ -523,37 +574,37 @@ const AudioSystem = {
   bgm: null,
   sounds: {},
   enabled: true,
-  
+
   init() {
     // 加载背景音乐
     this.bgm = new Audio('audio/background.mp3');
     this.bgm.loop = true;
     this.bgm.volume = 0.3;
-    
+
     // 加载音效
     this.sounds.jump = new Audio('audio/jump.mp3');
     this.sounds.slide = new Audio('audio/slide.mp3');
     this.sounds.hit = new Audio('audio/hit.mp3');
     this.sounds.start = new Audio('audio/start.mp3');
   },
-  
+
   playBGM() {
     if (!this.enabled || !this.bgm) return;
     this.bgm.currentTime = 0;
     this.bgm.play().catch(e => console.log('BGM play failed:', e));
   },
-  
+
   stopBGM() {
     if (this.bgm) this.bgm.pause();
   },
-  
+
   play(name) {
     if (!this.enabled || !this.sounds[name]) return;
     const sound = this.sounds[name].cloneNode();
     sound.volume = 0.5;
     sound.play().catch(e => console.log('Sound play failed:', e));
   },
-  
+
   toggle() {
     this.enabled = !this.enabled;
     if (!this.enabled) this.stopBGM();
