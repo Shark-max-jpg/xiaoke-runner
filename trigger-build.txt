@@ -1,2 +1,0 @@
-<!-- trigger rebuild -->
-<script>console.log('rebuild triggered')</script>
