@@ -24,11 +24,15 @@
   #hint { margin-top: 12px; color: #535353; font-size: 14px; }
   #debug { margin-top: 6px; color: #999; font-size: 11px; }
   #tip { margin-top: 8px; color: #ff6b6b; font-size: 12px; }
+  #load-status { margin-top: 8px; color: #535353; font-size: 14px; }
+  #retry-load { margin-top: 8px; padding: 4px 10px; }
 </style>
 </head>
 <body>
-<canvas id="game"></canvas>
-<div id="hint">按空格键开始 / 跳跃 &nbsp;|&nbsp; ↓ 滑行 / 空中急降</div>
+<canvas id="game" hidden></canvas>
+<div id="load-status" role="status">正在加载游戏资源…</div>
+<button id="retry-load" type="button" hidden>重试加载</button>
+<div id="hint" hidden>按空格键开始 / 跳跃 &nbsp;|&nbsp; ↓ 滑行 / 空中急降</div>
 <div id="debug"></div>
 <div id="tip">如果游戏速度异常，请按 Ctrl+Shift+R 强制刷新</div>
 
@@ -50,6 +54,7 @@ const JUMP_FORCE = -15.5;
 const SLIDE_LOCK_FRAMES = 18;  // 急降滑行最短持续帧数（0.3 秒 @60FPS）
 const FAST_FALL_SPEED = 10.0;  // 急降速度（像素/帧，@60FPS 基准）
 const FPS_REF = 60;           // 归一化基准帧率：所有「每帧」参数都以此为参照
+const HITBOX_MARGIN = 10;
 
 // ============ 工具：扫描图片非透明像素的边界 ============
 function getBoundedImg(img) {
@@ -71,16 +76,10 @@ function getBoundedImg(img) {
       }
     }
   }
+  if (maxX < minX || maxY < minY) return null;
   const w = maxX - minX + 1;
   const h = maxY - minY + 1;
-  if (w === 0 || h === 0) return null;
-  // 裁剪到有内容的区域
-  const cropCanvas = document.createElement('canvas');
-  cropCanvas.width = w;
-  cropCanvas.height = h;
-  const cropCtx = cropCanvas.getContext('2d');
-  cropCtx.drawImage(img, -minX, -minY);
-  return { canvas: cropCanvas, w, h };
+  return { img, x: minX, y: minY, w, h };
 }
 
 // ============ 加载资源 ============
@@ -90,108 +89,157 @@ const SLIDE_IMG = 'slide.png';
 const OBSTACLE_DIR = 'obstacles/';
 const BG_DIR = 'Background/';
 
-// 多层视差背景
 const bgLayers = [
-  { name: 'BG2', img: new Image(), speed: 0.1, file: 'BG2.png' },
-  { name: 'BG',  img: new Image(), speed: 0.3, file: 'BG.png' },
-  { name: 'mid', img: new Image(), speed: 0.5, file: 'mid.png' },
-  { name: 'fore',img: new Image(), speed: 0.8, file: 'fore.png' },
-  { name: 'ground',img: new Image(), speed: 1.0, file: 'foreground.png' }
+  { speed: 0.1, file: 'BG2.png' },
+  { speed: 0.3, file: 'BG.png' },
+  { speed: 0.5, file: 'mid.png' },
+  { speed: 0.8, file: 'fore.png' },
+  { speed: 1.0, file: 'foreground.png' }
 ];
-bgLayers.forEach(layer => {
-  layer.img.onload = () => { log(layer.name + ' loaded ' + layer.img.naturalWidth + 'x' + layer.img.naturalHeight); checkReady(); };
-  layer.img.onerror = () => log('FAIL ' + layer.name);
-  layer.img.src = BG_DIR + layer.file;
-});
+const runFrames = Array(RUN_CYCLE).fill(null);
+const obstacleImages = {};
+let standImg = null, slideImg = null;
+let ready = false, loading = false;
+const loadStatus = document.getElementById('load-status');
+const retryLoad = document.getElementById('retry-load');
 
-let debugLog = [];
+function loadImage(path) {
+  return new Promise(resolve => {
+    const img = new Image();
+    const finish = result => {
+      clearTimeout(timeout);
+      img.onload = img.onerror = null;
+      resolve(result);
+    };
+    const timeout = setTimeout(() => finish(null), 10000);
+    img.onload = () => finish(img.naturalWidth && img.naturalHeight ? img : null);
+    img.onerror = () => finish(null);
+    img.src = path;
+  });
+}
+
+async function loadGame() {
+  if (loading || ready) return;
+  loading = true;
+  retryLoad.hidden = true;
+  loadStatus.textContent = '正在加载游戏资源…';
+  const failed = [];
+  async function load(path) {
+    const img = await loadImage(path);
+    if (!img) failed.push(path);
+    return img;
+  }
+
+  try {
+    await Promise.all([
+      ...runFrames.map(async (_, i) => {
+        runFrames[i] = await load(FRAME_DIR + 'frame_' + String(i + 1).padStart(4, '0') + '.png');
+      }),
+      ...bgLayers.map(async layer => { layer.img = await load(BG_DIR + layer.file); }),
+      ...Object.keys(OBS_DEFS).map(async type => {
+        obstacleImages[type] = await load(OBSTACLE_DIR + type + '.png');
+      }),
+      load(STANDING_IMG).then(img => { standImg = img; }),
+      load(SLIDE_IMG).then(img => { slideImg = img; })
+    ]);
+    if (!runFrames.some(Boolean)) throw new Error('跑步动画未能加载，请检查 frames/ 中的图片。');
+    if (!ctx) throw new Error('当前浏览器无法创建游戏画布。');
+    initGame();
+    ready = true;
+    canvas.hidden = false;
+    document.getElementById('hint').hidden = false;
+    loadStatus.hidden = true;
+    if (failed.length) log(`部分素材未加载，已使用备用画面（${failed.length} 项）`);
+    requestAnimationFrame(loop);
+  } catch (error) {
+    loadStatus.textContent = `无法启动游戏：${error.message}`;
+    retryLoad.hidden = false;
+  } finally {
+    loading = false;
+  }
+}
+
 function log(msg) {
-  debugLog.push(msg);
-  debugEl.textContent = debugLog.join(' | ');
-}
-
-const runFrames = [];
-let runLoaded = 0;
-
-for (let i = 1; i <= RUN_CYCLE; i++) {
-  const img = new Image();
-  img.onload = () => {
-    runLoaded++;
-    log(`run ${i}/${RUN_CYCLE} ok ${img.naturalWidth}x${img.naturalHeight}`);
-    if (runLoaded >= RUN_CYCLE) log('ALL RUN LOADED');
-    checkReady();
-  };
-  img.onerror = () => log(`FAIL frame ${i}`);
-  img.src = FRAME_DIR + 'frame_' + String(i).padStart(4, '0') + '.png';
-  runFrames.push(img);
-}
-
-const standImg = new Image();
-standImg.onload = () => { log(`stand loaded ${standImg.naturalWidth}x${standImg.naturalHeight}`); checkReady(); };
-standImg.onerror = () => log('FAIL stand');
-standImg.src = STANDING_IMG;
-
-const slideImg = new Image();
-slideImg.onload = () => { log(`slide loaded ${slideImg.naturalWidth}x${slideImg.naturalHeight}`); checkReady(); };
-slideImg.onerror = () => log('FAIL slide');
-slideImg.src = SLIDE_IMG;
-
-// 障碍物素材
-const obsGround1 = new Image();
-const obsGround2 = new Image();
-const obsLow = new Image();
-const obsHigh = new Image();
-
-function loadObs(img, url, name) {
-  img.onload = () => { log(`${name} loaded ${img.naturalWidth}x${img.naturalHeight}`); checkReady(); };
-  img.onerror = () => log(`FAIL ${name}`);
-  img.src = OBSTACLE_DIR + url;
-}
-loadObs(obsGround1, 'ground1.png', 'ground1');
-loadObs(obsGround2, 'ground2.png', 'ground2');
-loadObs(obsLow, 'low.png', 'low');
-loadObs(obsHigh, 'high.png', 'high');
-
-let allLoaded = false;
-function checkReady() {
-  if (allLoaded) return;
-  if (runLoaded < RUN_CYCLE) return;
-  if (!standImg.complete || !slideImg.complete) return;
-  if (!obsGround1.complete || !obsGround2.complete || !obsLow.complete || !obsHigh.complete) return;
-  if (!bgLayers.every(l => l.img.complete)) return;
-  log('STARTING GAME');
-  initGame();
+  debugEl.textContent = msg;
 }
 
 // ============ 游戏状态 ============
 const STATE = { WAIT: 0, PLAY: 1, OVER: 2 };
 let state = STATE.WAIT;
-let score = 0, speed = 6.3, lastObsTime = 0;
-// 从 localStorage 读取最高分
-let highScore = parseInt(localStorage.getItem('xiaoke_highscore')) || 0;
+const BASE_SPEED = 7.5;
+const HIGH_SCORE_KEY = 'xiaoke_highscore';
+let score = 0, speed = BASE_SPEED;
+let highScore = readHighScore();
+
+function readHighScore() {
+  try {
+    const stored = Number(localStorage.getItem(HIGH_SCORE_KEY));
+    return Number.isSafeInteger(stored) && stored > 0 ? stored : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function saveHighScore() {
+  highScore = Math.max(highScore, Math.floor(score));
+  try {
+    localStorage.setItem(HIGH_SCORE_KEY, String(highScore));
+  } catch {
+    // 无法持久化时，本次页面仍保留内存中的最高分。
+  }
+}
 let frameTimer = 0, runFrameIdx = 0;
 
 const player = { x: 80, y: 0, vy: 0, grounded: true, ducking: false, duckHeld: false, slideTimer: 0, fastFall: false };
 let obstacles = [];
-let obsNextX = W + 200;
 let groundY = H - 40;
 
 let playerDrawW = 0, playerDrawH = 0;
-let standBounded = null;   // { canvas, w, h }
-let slideBounded = null;   // { canvas, w, h }
+let standBounded = null;
+let slideBounded = null;
+// slide.png 的非透明区域；直接打开本地页面时无需读取 Canvas 像素。
+const SLIDE_CROP = { sourceW: 627, sourceH: 627, x: 159, y: 209, w: 309, h: 193 };
 let standDrawW = 0, standDrawH = 0;
 let slideDrawW = 0, slideDrawH = 0;
 
 // ============ 初始化 ============
+function cropPose(img, knownCrop) {
+  if (!img) return null;
+  if (knownCrop && img.naturalWidth === knownCrop.sourceW && img.naturalHeight === knownCrop.sourceH) {
+    const { x, y, w, h } = knownCrop;
+    return { img, x, y, w, h };
+  }
+  try {
+    return getBoundedImg(img);
+  } catch {
+    // file:// 下不能读取像素时，滑行可直接绘制原图，待机沿用首帧备用。
+    return knownCrop ? { img, x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight } : null;
+  }
+}
+
+function drawPose(pose, x, y, w, h) {
+  ctx.drawImage(pose.img, pose.x, pose.y, pose.w, pose.h, x, y, w, h);
+}
+
 function initGame() {
-  const srcW = runFrames[0].naturalWidth;
-  const srcH = runFrames[0].naturalHeight;
+  const firstFrame = runFrames.find(Boolean);
+  const srcW = firstFrame.naturalWidth;
+  const srcH = firstFrame.naturalHeight;
+  let lastFrame = firstFrame;
+  for (let i = 0; i < runFrames.length; i++) {
+    lastFrame = runFrames[i] || lastFrame;
+    runFrames[i] = lastFrame;
+  }
   // 跑步帧略大一些（1.3倍），站立/滑行保持与其他一致
   playerDrawW = Math.round(srcW * SCALE * 1.3);
   playerDrawH = Math.round(srcH * SCALE * 1.3);
 
-  standBounded = getBoundedImg(standImg);
-  slideBounded = getBoundedImg(slideImg);
+  standBounded = cropPose(standImg);
+  slideBounded = cropPose(slideImg, SLIDE_CROP);
+  standDrawH = Math.round(playerDrawH * 0.9);
+  standDrawW = playerDrawW;
+  slideDrawH = Math.max(21, Math.round(playerDrawH * 0.60));
+  slideDrawW = playerDrawW;
 
   // 站立/滑行图以跑步帧高度为基准，等比缩放，保证三者视觉一致
   if (standBounded) {
@@ -210,16 +258,14 @@ function initGame() {
   groundY = H - maxH - 10;
   log(`player=${playerDrawW}x${playerDrawH} groundY=${groundY}`);
   resetGame();
-  requestAnimationFrame(loop);
 }
 
 function resetGame() {
   state = STATE.WAIT;
-  score = 0; speed = 6.3;
+  score = 0; speed = BASE_SPEED;
   // highScore 不从 localStorage 重置，保持历史最高
   obstacles = [];
-  obsNextX = W + 200;
-  lastObsTime = 0; // 重置障碍物计时
+  player.y = 0;
   player.vy = 0; player.grounded = true; player.ducking = false;
   player.duckHeld = false; player.slideTimer = 0;
   player.fastFall = false;
@@ -228,16 +274,20 @@ function resetGame() {
 
 // ============ 输入 ============
 document.addEventListener('keydown', e => {
+  if (!ready) return;
   if (e.code === 'Space' || e.code === 'ArrowUp') {
     e.preventDefault();
-    if (state === STATE.WAIT || state === STATE.OVER) { console.log('SPACE pressed, state:', state, 'isWAIT:', state === 0, 'isOVER:', state === 2);
+    if (!AudioSystem.bgm) {
+      AudioSystem.init();
+      AudioSystem.playBGM();
+    }
+    if (state === STATE.WAIT || state === STATE.OVER) {
       resetGame();
       state = STATE.PLAY;
-      log('STARTED'); console.log('State changed to PLAY'); AudioSystem.play('start');
     } else if (state === STATE.PLAY && player.grounded) {
       player.vy = JUMP_FORCE;
       player.grounded = false;
-      AudioSystem.play('jump');
+
     }
   }
   if (e.code === 'ArrowDown') {
@@ -330,32 +380,35 @@ function spawnObstacleAt(x, forceType) {
       obsType = 'high';
     }
   }
-  obstacles.push({ x: x, w, h, y, type: obsType });
+  const obstacle = { x, w, h, y, type: obsType };
+  obstacles.push(obstacle);
+  return obstacle;
 }
 
-function spawnObstacle() {
-  // 根据当前速度计算最小安全间隔：确保玩家有至少 1.0 秒的反应时间
-  // speed 语义为「60Hz 基准下的每帧像素」，故每秒移动 speed * 60 像素
-  // 高刷新率下已按 dt 归一化，因此用 60 帧基准换算间隔
-  const reactionTime = 1.0; // 秒
-  const FPS_REF = 60;
-  const minGap = speed * FPS_REF * reactionTime; // 像素：至少让玩家有 reactionTime 秒的缓冲
-  const maxGap = minGap * 1.5;
-  const gap = minGap + Math.random() * (maxGap - minGap);
-  obsNextX += gap;
-  spawnObstacleAt(obsNextX);
+function canJumpOverPair(first, second) {
+  const clearance = Math.max(first.h, second.h) - HITBOX_MARGIN;
+  // 用 33ms 上限对应的积分误差估算保守的跳跃净空时间（60Hz 基准帧）。
+  const jumpSpeed = -JUMP_FORCE - GRAVITY * (33 / 16.67) / 2;
+  const discriminant = jumpSpeed ** 2 - 2 * GRAVITY * clearance;
+  if (discriminant <= 0) return false;
+  const clearFrames = 2 * Math.sqrt(discriminant) / GRAVITY - 33 / 16.67;
+  const span = second.x + second.w - first.x + Math.max(1, playerDrawW - 2 * HITBOX_MARGIN);
+  return span <= speed * clearFrames;
+}
 
-  // 只有地面障碍物可以组合（30%概率），飞行障碍不组合
-  const lastObs = obstacles[obstacles.length - 1];
-  if (lastObs && Math.random() < 0.3) {
-    // 只有上一个也是地面障碍时才组合，且下一个必须是地面障碍
-    if (lastObs.type === 'ground1' || lastObs.type === 'ground2') {
-      const comboGap = 2 + Math.random() * 5;
-      obsNextX = lastObs.x + lastObs.w + comboGap;
-      // 只生成地面障碍（ground1 或 ground2）
-      const isGround2 = Math.random() < 0.4;
-      spawnObstacleAt(obsNextX, isGround2 ? 'ground2' : 'ground1');
-    }
+function refillObstacles() {
+  const spawnEdge = W + 80;
+  const last = obstacles[obstacles.length - 1];
+  const rightEdge = last ? last.x + last.w : 0;
+  if (last && rightEdge > spawnEdge) return;
+
+  // 上一组移近屏幕后才补一组；组间距离从上一组尾端算起。
+  const gap = speed * FPS_REF * (1 + Math.random() * 0.5);
+  const first = spawnObstacleAt(last ? Math.max(spawnEdge, rightEdge + gap) : spawnEdge);
+  if ((first.type === 'ground1' || first.type === 'ground2') && Math.random() < 0.3) {
+    const comboX = first.x + first.w + 2 + Math.random() * 5;
+    const second = spawnObstacleAt(comboX, Math.random() < 0.4 ? 'ground2' : 'ground1');
+    if (!canJumpOverPair(first, second)) obstacles.pop();
   }
 }
 
@@ -368,8 +421,8 @@ function getPlayerRect() {
   const dw = isSlide ? slideDrawW : playerDrawW;
   const dh = isSlide ? slideDrawH : playerDrawH;
   const dy = groundY - dh + player.y;
-  const margin = 10;
-  return { x: player.x + margin, y: dy + margin, w: dw - margin * 2, h: dh - margin * 2 };
+  const margin = HITBOX_MARGIN;
+  return { x: player.x + margin, y: dy + margin, w: Math.max(1, dw - margin * 2), h: Math.max(1, dh - margin * 2) };
 }
 
 // ============ 主循环 ============
@@ -377,12 +430,12 @@ let lastTimestamp = 0;
 function loop(timestamp) {
   const dt = Math.min(timestamp - lastTimestamp, 33);
   lastTimestamp = timestamp;
-  update(dt, timestamp);
+  update(dt);
   draw(dt);
   requestAnimationFrame(loop);
 }
 
-function update(dt, timestamp) {
+function update(dt) {
   if (state !== STATE.PLAY) return;
 
   frameTimer += dt;
@@ -414,33 +467,19 @@ function update(dt, timestamp) {
     if (player.slideTimer <= 0 && !player.duckHeld) player.ducking = false;
   }
 
-  // 障碍物生成：按时间间隔生成，确保玩家有足够反应时间
-  if (state === STATE.PLAY && obstacles.length === 0) {
-    // 第一个障碍物立即生成
-    spawnObstacle();
-    lastObsTime = timestamp;
-  } else {
-    const timeSinceLastObs = (timestamp - lastObsTime) / 1000; // 秒
-    if (timeSinceLastObs >= 0.7) { // 至少 0.7 秒才允许生成新障碍
-      spawnObstacle();
-      lastObsTime = timestamp;
-    }
-  }
-
   // 障碍物移动：按 dt 归一化到 60Hz 基准，避免高刷新率显示器下速度异常
   for (let i = obstacles.length - 1; i >= 0; i--) {
     obstacles[i].x -= speed * norm;
     if (obstacles[i].x + obstacles[i].w < 0) obstacles.splice(i, 1);
   }
 
+  refillObstacles();
+
   const pRect = getPlayerRect();
   for (const obs of obstacles) {
     if (rectsOverlap(pRect, obs)) {
       state = STATE.OVER;
-      if (score > highScore) {
-        highScore = score;
-        localStorage.setItem('xiaoke_highscore', Math.floor(highScore));
-      }
+      if (Math.floor(score) > highScore) saveHighScore();
       AudioSystem.play('hit');
       log(`OVER score=${Math.floor(score)}`);
       return;
@@ -448,7 +487,7 @@ function update(dt, timestamp) {
   }
 
   score += dt * 0.05;
-  speed = 7.5 + Math.floor(score / 300) * 0.3;
+  speed = BASE_SPEED + Math.floor(score / 300) * 0.3;
 }
 
 // ============ 绘制 ============
@@ -458,10 +497,12 @@ function draw(dt) {
   // 绘制多层视差背景
   // 使用 dt（毫秒）归一化，避免高刷新率显示器让游戏变快
   const ms = dt || 16.67;
-  let hasAnyBG = false;
+  if (bgLayers.some(layer => !layer.img)) {
+    ctx.fillStyle = '#b4bdd3';
+    ctx.fillRect(0, 0, W, H);
+  }
   bgLayers.forEach(layer => {
-    if (!layer.img.complete) return;
-    hasAnyBG = true;
+    if (!layer.img) return;
     const imgW = layer.img.naturalWidth;
     const imgH = layer.img.naturalHeight;
     const drawH = H;
@@ -473,18 +514,6 @@ function draw(dt) {
     ctx.drawImage(layer.img, -layerOffset, 0, drawW, drawH);
     ctx.drawImage(layer.img, drawW - layerOffset, 0, drawW, drawH);
   });
-  if (!hasAnyBG) {
-    ctx.fillStyle = '#1a1a2e';
-    ctx.fillRect(0, 0, W, H);
-    ctx.strokeStyle = '#535353';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(0, groundY);
-    ctx.lineTo(W, groundY);
-    ctx.stroke();
-    return;
-  }
-
   ctx.strokeStyle = '#535353';
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -496,15 +525,8 @@ function draw(dt) {
 
   // 障碍物（用图片绘制）
   for (const obs of obstacles) {
-    let img;
-    switch (obs.type) {
-      case 'ground1': img = obsGround1; break;
-      case 'ground2': img = obsGround2; break;
-      case 'low': img = obsLow; break;
-      case 'high': img = obsHigh; break;
-      default: img = obsGround1;
-    }
-    if (img && img.complete) {
+    const img = obstacleImages[obs.type];
+    if (img) {
       ctx.drawImage(img, obs.x, obs.y, obs.w, obs.h);
     } else {
       ctx.fillStyle = '#535353';
@@ -529,33 +551,25 @@ function drawPlayer() {
   const px = player.x;
 
   if (state === STATE.WAIT) {
-    if (standBounded) {
-      ctx.drawImage(standBounded.canvas, px, groundY - standDrawH, standDrawW, standDrawH);
-    }
+    if (standBounded) drawPose(standBounded, px, groundY - standDrawH, standDrawW, standDrawH);
+    else ctx.drawImage(runFrames[0], px, groundY - standDrawH, standDrawW, standDrawH);
     return;
   }
 
   const isSlide = player.ducking && player.grounded;
   // 急降过程中用滑行姿势朝下压低身形，落地瞬间衔接滑行
-  const isFastFall = player.fastFall && slideBounded;
-
-  if (isSlide && slideBounded) {
-    ctx.drawImage(slideBounded.canvas, px, groundY - slideDrawH, slideDrawW, slideDrawH);
-    return;
-  }
-  if (isFastFall) {
-    const dy = groundY - playerDrawH + player.y;
-    ctx.drawImage(slideBounded.canvas, px, dy, slideDrawW, slideDrawH);
+  if (isSlide || player.fastFall) {
+    const dy = isSlide ? groundY - slideDrawH : groundY - playerDrawH + player.y;
+    if (slideBounded) {
+      drawPose(slideBounded, px, dy, slideDrawW, slideDrawH);
+    } else {
+      ctx.drawImage(runFrames[runFrameIdx], px, dy, slideDrawW, slideDrawH);
+    }
     return;
   }
 
   // 跑步 / 跳跃
   const img = runFrames[runFrameIdx];
-  if (!img || !img.complete) {
-    ctx.fillStyle = 'red';
-    ctx.fillRect(px, groundY - playerDrawH, playerDrawW, playerDrawH);
-    return;
-  }
   const dy = groundY - playerDrawH + player.y;
   ctx.drawImage(img, px, dy, playerDrawW, playerDrawH);
 }
@@ -582,10 +596,7 @@ const AudioSystem = {
     this.bgm.volume = 0.3;
 
     // 加载音效
-    this.sounds.jump = new Audio('audio/jump.mp3');
-    this.sounds.slide = new Audio('audio/slide.mp3');
     this.sounds.hit = new Audio('audio/hit.mp3');
-    this.sounds.start = new Audio('audio/start.mp3');
   },
 
   playBGM() {
@@ -613,14 +624,8 @@ const AudioSystem = {
   }
 };
 
-// 用户交互后启动音频（浏览器要求）
-document.addEventListener('keydown', function initAudio() {
-  if (!AudioSystem.bgm) {
-    AudioSystem.init();
-    AudioSystem.playBGM();
-  }
-  document.removeEventListener('keydown', initAudio);
-}, { once: true });
+retryLoad.addEventListener('click', loadGame);
+loadGame();
 </script>
 </body>
 </html>
