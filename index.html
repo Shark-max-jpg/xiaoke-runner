@@ -2,6 +2,7 @@
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>鲨克快跑</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -11,19 +12,27 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    height: 100vh;
+    min-height: 100vh;
+    min-height: 100dvh;
+    padding: 12px;
     font-family: 'Courier New', monospace;
-    overflow: hidden;
   }
+  [hidden] { display: none !important; }
   canvas {
-    border-bottom: 3px solid #535353;
+    width: min(800px, 100%);
+    height: auto;
+    box-shadow: 0 3px #535353;
     image-rendering: pixelated;
     image-rendering: crisp-edges;
     background: #fff;
   }
   #hint { margin-top: 12px; color: #535353; font-size: 14px; }
   #debug { margin-top: 6px; color: #999; font-size: 11px; }
-  #tip { margin-top: 8px; color: #ff6b6b; font-size: 12px; }
+  #hint, #debug { text-align: center; }
+  #controls { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 12px; }
+  #controls button { min-height: 44px; padding: 6px 14px; font: inherit; cursor: pointer; }
+  #slide-control { touch-action: none; user-select: none; }
+  #mute-control[aria-pressed="true"] { background: #24334b; color: #fff; }
   #load-status { margin-top: 8px; color: #535353; font-size: 14px; }
   #retry-load { margin-top: 8px; padding: 4px 10px; }
 </style>
@@ -32,9 +41,13 @@
 <canvas id="game" hidden></canvas>
 <div id="load-status" role="status">正在加载游戏资源…</div>
 <button id="retry-load" type="button" hidden>重试加载</button>
-<div id="hint" hidden>按空格键开始 / 跳跃 &nbsp;|&nbsp; ↓ 滑行 / 空中急降</div>
+<div id="hint" hidden>空格 / ↑：开始或跳跃；按住 ↓：滑行；空中按 ↓：急降</div>
+<div id="controls" hidden>
+  <button id="jump-control" type="button">开始 / 跳跃</button>
+  <button id="slide-control" type="button">按住滑行 / 急降</button>
+  <button id="mute-control" type="button" aria-pressed="false">静音</button>
+</div>
 <div id="debug"></div>
-<div id="tip">如果游戏速度异常，请按 Ctrl+Shift+R 强制刷新</div>
 
 <script>
 const canvas = document.getElementById('game');
@@ -148,6 +161,7 @@ async function loadGame() {
     ready = true;
     canvas.hidden = false;
     document.getElementById('hint').hidden = false;
+    document.getElementById('controls').hidden = false;
     loadStatus.hidden = true;
     if (failed.length) log(`部分素材未加载，已使用备用画面（${failed.length} 项）`);
     requestAnimationFrame(loop);
@@ -265,6 +279,7 @@ function resetGame() {
   score = 0; speed = BASE_SPEED;
   // highScore 不从 localStorage 重置，保持历史最高
   obstacles = [];
+  for (const layer of bgLayers) layer.offset = 0;
   player.y = 0;
   player.vy = 0; player.grounded = true; player.ducking = false;
   player.duckHeld = false; player.slideTimer = 0;
@@ -273,42 +288,84 @@ function resetGame() {
 }
 
 // ============ 输入 ============
+let slideKeyHeld = false;
+let slidePointer = null;
+const slideControl = document.getElementById('slide-control');
+const muteControl = document.getElementById('mute-control');
+
+function startOrJump() {
+  if (!ready) return;
+  if (!AudioSystem.bgm) {
+    AudioSystem.init();
+    AudioSystem.playBGM();
+  }
+  if (state !== STATE.PLAY) {
+    resetGame();
+    state = STATE.PLAY;
+    if (slideKeyHeld || slidePointer !== null) syncSlideInput();
+  } else if (player.grounded) {
+    player.vy = JUMP_FORCE;
+    player.grounded = false;
+  }
+}
+
+function syncSlideInput() {
+  if (state !== STATE.PLAY) return;
+  player.duckHeld = slideKeyHeld || slidePointer !== null;
+  if (player.duckHeld) {
+    if (!player.grounded && !player.fastFall) {
+      player.fastFall = true;
+      player.vy = 0;
+    }
+    player.ducking = true;
+  } else if (player.slideTimer <= 0 && !player.fastFall) {
+    player.ducking = false;
+  }
+}
+
 document.addEventListener('keydown', e => {
   if (!ready) return;
   if (e.code === 'Space' || e.code === 'ArrowUp') {
+    if (e.target?.closest?.('button')) return;
     e.preventDefault();
-    if (!AudioSystem.bgm) {
-      AudioSystem.init();
-      AudioSystem.playBGM();
-    }
-    if (state === STATE.WAIT || state === STATE.OVER) {
-      resetGame();
-      state = STATE.PLAY;
-    } else if (state === STATE.PLAY && player.grounded) {
-      player.vy = JUMP_FORCE;
-      player.grounded = false;
-
-    }
-  }
-  if (e.code === 'ArrowDown') {
+    startOrJump();
+  } else if (e.code === 'ArrowDown') {
     e.preventDefault();
-    if (state === STATE.PLAY) {
-      player.duckHeld = true;
-      if (!player.grounded && !player.fastFall) {
-        // 空中按 ↓ 急降：进入快速下降动画，落地后自动转入滑行
-        player.fastFall = true;
-        player.vy = 0;
-      }
-      player.ducking = true;
-    }
+    if (slideKeyHeld) return;
+    slideKeyHeld = true;
+    syncSlideInput();
   }
 });
 document.addEventListener('keyup', e => {
-  if (e.code === 'ArrowDown') {
-    player.duckHeld = false;
-    // 急降中松手不取消滑行姿态，只等落地后再解除
-    if (player.slideTimer <= 0 && !player.fastFall) player.ducking = false;
-  }
+  if (e.code !== 'ArrowDown') return;
+  slideKeyHeld = false;
+  syncSlideInput();
+});
+document.getElementById('jump-control').addEventListener('click', startOrJump);
+slideControl.addEventListener('pointerdown', e => {
+  if (e.button !== 0 || slidePointer !== null || state !== STATE.PLAY) return;
+  e.preventDefault();
+  slideControl.setPointerCapture(e.pointerId);
+  slidePointer = e.pointerId;
+  syncSlideInput();
+});
+function releaseSlidePointer(e) {
+  if (slidePointer !== e.pointerId) return;
+  slidePointer = null;
+  syncSlideInput();
+}
+for (const event of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+  slideControl.addEventListener(event, releaseSlidePointer);
+}
+slideControl.addEventListener('contextmenu', e => e.preventDefault());
+window.addEventListener('blur', () => {
+  slideKeyHeld = false;
+  slidePointer = null;
+  syncSlideInput();
+});
+muteControl.addEventListener('click', () => {
+  AudioSystem.toggle();
+  muteControl.setAttribute('aria-pressed', String(!AudioSystem.enabled));
 });
 
 // ============ 障碍物 ============
@@ -431,7 +488,7 @@ function loop(timestamp) {
   const dt = Math.min(timestamp - lastTimestamp, 33);
   lastTimestamp = timestamp;
   update(dt);
-  draw(dt);
+  draw();
   requestAnimationFrame(loop);
 }
 
@@ -446,6 +503,9 @@ function update(dt) {
 
   // 跳跃/急降/滑行锁定：按 dt 归一化到 60Hz 基准，避免高刷新率显示器让手感不一致
   const norm = dt / 16.67;
+  for (const layer of bgLayers) {
+    if (layer.img) layer.offset = (layer.offset + speed * 0.15 * layer.speed * norm) % backgroundWidth(layer);
+  }
   if (player.fastFall) {
     // 急降：匀速下降，速度可调
     player.y += FAST_FALL_SPEED * norm;
@@ -491,28 +551,21 @@ function update(dt) {
 }
 
 // ============ 绘制 ============
-let bgOffset = 0; // 背景滚动偏移（连续小数偏移，避免按帧跳跃）
+function backgroundWidth(layer) {
+  return H * layer.img.naturalWidth / layer.img.naturalHeight;
+}
 
-function draw(dt) {
-  // 绘制多层视差背景
-  // 使用 dt（毫秒）归一化，避免高刷新率显示器让游戏变快
-  const ms = dt || 16.67;
+function draw() {
   if (bgLayers.some(layer => !layer.img)) {
     ctx.fillStyle = '#b4bdd3';
     ctx.fillRect(0, 0, W, H);
   }
   bgLayers.forEach(layer => {
     if (!layer.img) return;
-    const imgW = layer.img.naturalWidth;
-    const imgH = layer.img.naturalHeight;
-    const drawH = H;
-    const drawW = (imgW / imgH) * drawH;
-    // 按时间和层速度累加偏移
-    bgOffset += speed * 0.15 * layer.speed * (ms / 16.67);
-    const layerOffset = bgOffset % drawW;
-    // 绘制两层实现无缝滚动
-    ctx.drawImage(layer.img, -layerOffset, 0, drawW, drawH);
-    ctx.drawImage(layer.img, drawW - layerOffset, 0, drawW, drawH);
+    const width = backgroundWidth(layer);
+    for (let x = -layer.offset; x < W; x += width) {
+      ctx.drawImage(layer.img, x, 0, width, H);
+    }
   });
   ctx.strokeStyle = '#535353';
   ctx.lineWidth = 2;
@@ -543,8 +596,8 @@ function draw(dt) {
     ctx.fillText(`HI: ${Math.floor(highScore)}`, W - 20, 50);
   }
 
-  if (state === STATE.WAIT) drawCenterText('鲨克快跑', '按空格键开始');
-  else if (state === STATE.OVER) drawCenterText('GAME OVER', '按空格键重试');
+  if (state === STATE.WAIT) drawCenterText('鲨克快跑', '点「开始 / 跳跃」或按空格键');
+  else if (state === STATE.OVER) drawCenterText('GAME OVER', '点「开始 / 跳跃」或按空格键重试');
 }
 
 function drawPlayer() {
@@ -601,7 +654,6 @@ const AudioSystem = {
 
   playBGM() {
     if (!this.enabled || !this.bgm) return;
-    this.bgm.currentTime = 0;
     this.bgm.play().catch(e => console.log('BGM play failed:', e));
   },
 
@@ -611,15 +663,20 @@ const AudioSystem = {
 
   play(name) {
     if (!this.enabled || !this.sounds[name]) return;
-    const sound = this.sounds[name].cloneNode();
+    const sound = this.sounds[name];
+    sound.currentTime = 0;
     sound.volume = 0.5;
     sound.play().catch(e => console.log('Sound play failed:', e));
   },
 
   toggle() {
     this.enabled = !this.enabled;
-    if (!this.enabled) this.stopBGM();
-    else this.playBGM();
+    if (!this.enabled) {
+      this.stopBGM();
+      for (const sound of Object.values(this.sounds)) sound.pause();
+    } else {
+      this.playBGM();
+    }
     return this.enabled;
   }
 };

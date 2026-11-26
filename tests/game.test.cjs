@@ -14,6 +14,8 @@ async function boot({ missing = () => false, blocked = false, stalled = () => fa
   const pending = new Map();
   const draws = [];
   const sprites = [];
+  const audio = [];
+  const window = { handlers: {}, addEventListener(type, fn) { this.handlers[type] = fn; } };
   const storage = new Map();
   const ctx = {
     drawImage(image, ...args) { assert.ok(image.width || image.naturalWidth); sprites.push({ file: image.file, args }); },
@@ -25,7 +27,9 @@ async function boot({ missing = () => false, blocked = false, stalled = () => fa
     fillRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}
   };
   function element() {
-    return { hidden: false, handlers: {}, getContext: () => ctx,
+    return { hidden: false, handlers: {}, attrs: {}, getContext: () => ctx,
+      setAttribute(name, value) { this.attrs[name] = value; },
+      setPointerCapture(id) { this.captured = id; },
       addEventListener(type, fn) { this.handlers[type] = fn; } };
   }
   const document = Object.assign(element(), {
@@ -37,6 +41,7 @@ async function boot({ missing = () => false, blocked = false, stalled = () => fa
   });
   const c = vm.createContext({
     document,
+    window,
     Image: class {
       set src(file) {
         this.file = file;
@@ -51,9 +56,9 @@ async function boot({ missing = () => false, blocked = false, stalled = () => fa
       }
     },
     Audio: class {
-      constructor(file) { assert.ok(fs.existsSync(path.join(root, file)), file); }
-      cloneNode() { return this; }
-      play() { return Promise.resolve(); }
+      constructor(file) { assert.ok(fs.existsSync(path.join(root, file)), file); this.file = file; }
+      play() { audio.push(['play', this.file]); return Promise.resolve(); }
+      pause() { audio.push(['pause', this.file]); }
     },
     localStorage: {
       getItem(key) { if (blocked) throw Error('blocked'); return storage.get(key) ?? null; },
@@ -66,9 +71,70 @@ async function boot({ missing = () => false, blocked = false, stalled = () => fa
   script.runInContext(c);
   const settle = () => new Promise(resolve => setImmediate(resolve));
   await settle();
-  return { e: js => vm.runInContext(js, c), frames, elements, draws, sprites, pending, storage, settle,
-    key: code => document.handlers.keydown({ code, preventDefault() {} }) };
+  return { e: js => vm.runInContext(js, c), frames, elements, draws, sprites, audio, window, pending, storage, settle,
+    key: code => document.handlers.keydown({ code, preventDefault() {} }),
+    keyUp: code => document.handlers.keyup({ code }) };
 }
+
+test('parallax layers move independently only during play and reset on restart', async () => {
+  const { e, key, sprites } = await boot();
+  e('update(16.67); draw()');
+  assert.equal(e('bgLayers.every(layer => layer.offset === 0)'), true);
+  key('Space');
+  e('update(16.67); draw()');
+  assert.equal(e('bgLayers.every(layer => Math.abs(layer.offset - BASE_SPEED * 0.15 * layer.speed) < 1e-8)'), true);
+  for (const layer of ['BG2', 'BG', 'mid', 'fore', 'foreground']) {
+    const tiles = sprites.filter(call => call.file === `Background/${layer}.png`).slice(-2);
+    const [x, , width] = tiles.at(-1).args;
+    assert.ok(x + width >= 800);
+  }
+  e('state = STATE.OVER; const savedOffsets = bgLayers.map(layer => layer.offset); update(16.67); draw()');
+  assert.equal(e('bgLayers.every((layer, index) => layer.offset === savedOffsets[index])'), true);
+  key('Space');
+  assert.equal(e('bgLayers.every(layer => layer.offset === 0)'), true);
+});
+
+test('touch controls start, jump and release slide on pointer cancellation or blur', async () => {
+  const { e, elements, window, key } = await boot();
+  const jump = elements.get('jump-control');
+  const slide = elements.get('slide-control');
+  assert.equal(elements.get('controls').hidden, false);
+  jump.handlers.click();
+  const touch = { button: 0, pointerId: 4, preventDefault() {} };
+  slide.handlers.pointerdown(touch);
+  assert.equal(e('player.ducking && player.duckHeld'), true);
+  slide.handlers.pointercancel(touch);
+  assert.equal(e('player.ducking'), false);
+  jump.handlers.click();
+  assert.equal(e('player.grounded'), false);
+  slide.handlers.pointerdown(touch);
+  slide.handlers.lostpointercapture(touch);
+  assert.equal(e('player.fastFall && !player.duckHeld'), true);
+  e('for (let i = 0; i < 30; i++) update(16.67)');
+  assert.equal(e('player.grounded && !player.ducking'), true);
+  slide.handlers.pointerdown(touch);
+  key('ArrowDown');
+  slide.handlers.pointerup(touch);
+  assert.equal(e('player.duckHeld'), true);
+  window.handlers.blur();
+  assert.equal(e('!player.duckHeld && !player.ducking'), true);
+});
+
+test('mute blocks music and hit sounds, then resumes music on unmute', async () => {
+  const { e, elements, audio } = await boot();
+  const mute = elements.get('mute-control');
+  mute.handlers.click();
+  elements.get('jump-control').handlers.click();
+  e("AudioSystem.play('hit')");
+  assert.deepEqual(audio, []);
+  assert.equal(mute.attrs['aria-pressed'], 'true');
+  mute.handlers.click();
+  e("AudioSystem.play('hit')");
+  assert.equal(mute.attrs['aria-pressed'], 'false');
+  assert.deepEqual(audio, [['play', 'audio/background.mp3'], ['play', 'audio/hit.mp3']]);
+  mute.handlers.click();
+  assert.deepEqual(audio.slice(-2), [['pause', 'audio/background.mp3'], ['pause', 'audio/hit.mp3']]);
+});
 
 test('normal boot, start, collision, persistent high score and restart', async () => {
   const { e, frames, key, storage } = await boot();
@@ -101,12 +167,13 @@ test('missing optional graphics, blocked canvas reads and blocked storage do not
 });
 
 test('down key draws the slide sprite in both poses even when canvas pixel reads are blocked', async () => {
-  const { e, sprites, key } = await boot({ failCrop: true });
+  const { e, sprites, key, keyUp } = await boot({ failCrop: true });
   key('Space');
   key('ArrowDown');
   e('drawPlayer()');
   assert.equal(sprites.at(-1).file, 'slide.png');
   assert.deepEqual(sprites.at(-1).args.slice(0, 4), [159, 209, 309, 193]);
+  keyUp('ArrowDown');
   key('Space');
   key('ArrowDown');
   assert.equal(e('player.fastFall'), true);
